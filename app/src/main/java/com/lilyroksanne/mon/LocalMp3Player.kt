@@ -7,6 +7,8 @@ import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.MediaPlayer
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -22,10 +24,12 @@ internal class LocalMp3Player(
     private data class Track(val uri: Uri, val title: String, val genre: String)
     data class LibraryEntry(val position: Int, val title: String, val genre: String)
 
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val importer = Mp3Import(context)
     private val drive = MusicDownloads(context)
     private val driveUpdates = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-        key?.let(drive::savedTrack)?.let(::addDownload)
+        val saved = key?.let(drive::savedTrack) ?: return@OnSharedPreferenceChangeListener
+        runOnMain { addDownload(saved) }
     }
     private val importLock = Mutex()
     private var queueGenre: String? = null
@@ -44,7 +48,9 @@ internal class LocalMp3Player(
         .setAudioAttributes(audioAttributes)
         .setWillPauseWhenDucked(true)
         .setOnAudioFocusChangeListener { change ->
-            if (change < 0) pause()
+            if (change == AudioManager.AUDIOFOCUS_LOSS || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
+                runOnMain { pause() }
+            }
         }
         .build()
 
@@ -53,9 +59,11 @@ internal class LocalMp3Player(
         private set
     val genres: List<String> get() = library.map { it.genre }.distinct().sorted()
     val currentGenre: String? get() = library.getOrNull(index)?.genre
+    val currentUri: Uri? get() = library.getOrNull(index)?.uri
     val currentTitle: String? get() = library.getOrNull(index)?.title
     val positionLabel: String get() = if (library.isEmpty()) "" else "${index + 1} / ${library.size}"
     val isActive: Boolean get() = playWhenReady
+    val audioSessionId: Int get() = runCatching { player?.audioSessionId ?: 0 }.getOrDefault(0)
 
     init {
         val saved = runCatching { JSONArray(preferences.getString("tracks", "[]") ?: "[]") }
@@ -64,11 +72,21 @@ internal class LocalMp3Player(
             val entry = saved.optJSONObject(i) ?: continue
             val uri = entry.optString("uri")
             val title = entry.optString("title")
-            if (uri.isNotBlank() && title.isNotBlank()) library.add(Track(Uri.parse(uri), title, cleanGenre(entry.optString("genre"))))
+            if (uri.isNotBlank() && title.isNotBlank()) {
+                library.add(Track(Uri.parse(uri), title, cleanGenre(entry.optString("genre"))))
+            }
         }
-        drive.savedTracks().forEach(::addDownload)
+        drive.savedTracks().forEach(::addDownloadInternal)
         drive.index.registerOnSharedPreferenceChangeListener(driveUpdates)
         index = preferences.getInt("index", 0).coerceIn(0, library.lastIndex.coerceAtLeast(0))
+    }
+
+    private fun runOnMain(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) block() else mainHandler.post(block)
+    }
+
+    private fun notifyChanged() {
+        runOnMain { onChange?.invoke() }
     }
 
     suspend fun addFiles(uris: List<Uri>): String? = importLock.withLock {
@@ -78,13 +96,15 @@ internal class LocalMp3Player(
         for (uri in uris.distinct()) {
             try {
                 val copy = withContext(Dispatchers.IO) { importer.copy(uri) }
-                if (library.none { it.uri == copy.uri }) {
-                    val oldPosition = library.indexOfFirst { it.uri == uri }
-                    val imported = Track(copy.uri, copy.title, cleanGenre(copy.genre))
-                    if (oldPosition >= 0) library[oldPosition] = imported else library.add(imported)
-                    added++
-                    saveLibrary()
-                    onChange?.invoke()
+                withContext(Dispatchers.Main) {
+                    if (library.none { it.uri == copy.uri }) {
+                        val oldPosition = library.indexOfFirst { it.uri == uri }
+                        val imported = Track(copy.uri, copy.title, cleanGenre(copy.genre))
+                        if (oldPosition >= 0) library[oldPosition] = imported else library.add(imported)
+                        added++
+                        saveLibrary()
+                        onChange?.invoke()
+                    }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -101,6 +121,14 @@ internal class LocalMp3Player(
     }
 
     fun addDownload(download: MusicDownloads.SavedTrack): Boolean {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { addDownloadInternal(download) }
+            return true
+        }
+        return addDownloadInternal(download)
+    }
+
+    private fun addDownloadInternal(download: MusicDownloads.SavedTrack): Boolean {
         val uri = Uri.fromFile(download.file)
         if (library.any { it.uri == uri }) return false
         library.add(Track(uri, download.title, cleanGenre(download.genre)))
@@ -119,7 +147,7 @@ internal class LocalMp3Player(
         library[position] = track.copy(genre = cleanGenre(genre))
         if (position == index && queueGenre != null) queueGenre = library[position].genre
         saveLibrary()
-        onChange?.invoke()
+        notifyChanged()
     }
 
     fun select(position: Int, genre: String? = null) {
@@ -142,6 +170,7 @@ internal class LocalMp3Player(
         if (cleaned.isEmpty()) return UNTAGGED
         return library.firstOrNull { it.genre.equals(cleaned, ignoreCase = true) }?.genre ?: cleaned
     }
+
     fun play() {
         if (library.isEmpty() || playWhenReady) return
         val current = player
@@ -150,15 +179,15 @@ internal class LocalMp3Player(
         } else {
             playWhenReady = true
             if (ready) start(current)
-            onChange?.invoke()
+            notifyChanged()
         }
     }
 
     fun pause() {
         playWhenReady = false
-        if (ready) player?.pause()
+        if (ready) runCatching { player?.pause() }
         audioManager.abandonAudioFocusRequest(focusRequest)
-        onChange?.invoke()
+        notifyChanged()
     }
 
     private fun load(position: Int) {
@@ -176,7 +205,7 @@ internal class LocalMp3Player(
                 if (it === player) {
                     ready = true
                     if (playWhenReady) start(it)
-                    onChange?.invoke()
+                    notifyChanged()
                 }
             }
             next.setOnCompletionListener {
@@ -194,7 +223,7 @@ internal class LocalMp3Player(
                 true
             }
             next.prepareAsync()
-            onChange?.invoke()
+            notifyChanged()
         } catch (_: Exception) {
             reportError("No pude abrir este MP3. Revisa el archivo o elige otra pista.")
         }
@@ -217,13 +246,18 @@ internal class LocalMp3Player(
     private fun reportError(message: String) {
         releasePlayer()
         error = message
-        onChange?.invoke()
+        notifyChanged()
     }
 
     private fun saveLibrary() {
         val contents = JSONArray()
         library.forEach { track ->
-            contents.put(JSONObject().put("uri", track.uri.toString()).put("title", track.title).put("genre", track.genre))
+            contents.put(
+                JSONObject()
+                    .put("uri", track.uri.toString())
+                    .put("title", track.title)
+                    .put("genre", track.genre)
+            )
         }
         preferences.edit().putString("tracks", contents.toString()).apply()
     }
@@ -231,7 +265,7 @@ internal class LocalMp3Player(
     private fun releasePlayer() {
         playWhenReady = false
         ready = false
-        player?.release()
+        runCatching { player?.release() }
         player = null
         audioManager.abandonAudioFocusRequest(focusRequest)
     }

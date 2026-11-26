@@ -2,6 +2,7 @@ package com.lilyroksanne.mon
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -12,10 +13,16 @@ import android.util.AttributeSet
 import android.view.View
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toBitmap
-import com.lilyroksanne.mon.util.MonLogger
-import kotlin.math.min
+import kotlin.math.sin
 import kotlin.random.Random
 
+/**
+ * Low-RAM, zero-allocation-per-frame Matrix ASCII avatar view.
+ * - Does NOT retain full-resolution Bitmaps in RAM after computing compact ByteArray luminance grids.
+ * - Deduplicates repeated frame resource IDs.
+ * - Draws characters with a preallocated CharArray(1) to eliminate String GC churn.
+ * - Pauses rendering automatically when hidden or stopped.
+ */
 class MatrixSkullView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
@@ -32,52 +39,56 @@ class MatrixSkullView @JvmOverloads constructor(
         set(value) { field = value; updatePaints() }
 
     var initialFadeDurationMillis: Long = 1500L
-    var frameIntervalMillis: Long = 40L
+    var frameIntervalMillis: Long = 65L // ~15 FPS: smooth retro feel with ~40% less CPU
     var matrixChars: String = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@#$%&*+|@-/\\<>"
 
     private var isModemSoundActive = false
 
-    var minWaitSeconds: Float = 0.15f
-    var maxWaitSeconds: Float = 0.45f
+    var minWaitSeconds: Float = 0.25f
+    var maxWaitSeconds: Float = 0.65f
 
     private val asciiRamp = " .:-=+*#%@AYys"
+    private val charBuf = CharArray(1)
 
     private val paintText = Paint().apply {
         typeface = Typeface.MONOSPACE
-        isAntiAlias = true
+        isAntiAlias = false
         textSize = 24f
     }
 
     private val paintSkull = Paint().apply {
         typeface = Typeface.MONOSPACE
-        isAntiAlias = true
+        isAntiAlias = false
         textSize = 24f
     }
-    
-    // Pincel para el Glitch Analógico (rojo o blanco)
+
     private val paintGlitch = Paint().apply {
         typeface = Typeface.MONOSPACE
-        isAntiAlias = true
+        isAntiAlias = false
         textSize = 24f
         color = Color.WHITE
     }
-    
-    // Variables para controlar el glitch profundo y bizarro por inactividad
+
     private var lastActivityTime = System.currentTimeMillis()
     private var isBizarreIdleGlitchActive = false
-    private var bizarreGlitchEndTime = 0L // Cuándo debe terminar el glitch actual
+    private var bizarreGlitchEndTime = 0L
 
-    private var rawBitmaps: List<Bitmap> = emptyList()
-    private var grayMapsList: MutableList<Array<IntArray>> = mutableListOf()
+    private var frameResIds: List<Int> = emptyList()
+    private var grayMapsList: List<ByteArray> = emptyList()
+    private var gridRows = 0
+    private var gridCols = 0
+    private var cachedCharWidth = 14f
+    private var cachedCharHeight = 28.8f
     private var currentFrameIndex = 0
 
     private val handler = Handler(Looper.getMainLooper())
     private var viewCreationTime = System.currentTimeMillis()
     private var nextFrameSwitchTime = 0L
-
+    private var isAnimationRunning = false
 
     private val runnable = object : Runnable {
         override fun run() {
+            if (!isAnimationRunning) return
             val now = System.currentTimeMillis()
             if (grayMapsList.isNotEmpty() && now >= nextFrameSwitchTime) {
                 currentFrameIndex = (currentFrameIndex + 1) % grayMapsList.size
@@ -91,19 +102,23 @@ class MatrixSkullView @JvmOverloads constructor(
 
     init {
         updatePaints()
-        handler.post(runnable)
+    }
+
+    fun setAnimationRunning(running: Boolean) {
+        if (isAnimationRunning == running) return
+        isAnimationRunning = running
+        handler.removeCallbacks(runnable)
+        if (running && isAttachedToWindow && visibility == VISIBLE) {
+            handler.post(runnable)
+        }
     }
 
     fun setModemSoundActive(active: Boolean) {
-        if (isModemSoundActive != active) {
-            MonLogger.d("MatrixSkullView", "setModemSoundActive: Modificando a $active")
-        }
         isModemSoundActive = active
         resetIdleTimer()
     }
-    
+
     fun resetIdleTimer() {
-        MonLogger.d("MatrixSkullView", "resetIdleTimer: Reseteando tiempo de inactividad")
         lastActivityTime = System.currentTimeMillis()
         isBizarreIdleGlitchActive = false
         bizarreGlitchEndTime = 0L
@@ -117,74 +132,124 @@ class MatrixSkullView @JvmOverloads constructor(
     }
 
     fun setImageFrames(resIds: List<Int>) {
-        val bitmaps = mutableListOf<Bitmap>()
-        for (id in resIds) {
-            val drawable = ContextCompat.getDrawable(context, id)
-            if (drawable != null) {
-                bitmaps.add(drawable.toBitmap())
-            }
-        }
-        rawBitmaps = bitmaps
-        grayMapsList.clear()
+        frameResIds = resIds.toList()
+        grayMapsList = emptyList()
+        currentFrameIndex = 0
         viewCreationTime = System.currentTimeMillis()
-        nextFrameSwitchTime = System.currentTimeMillis() + 500L
+        nextFrameSwitchTime = viewCreationTime + 500L
         invalidate()
     }
 
     private fun processBitmapsOnce() {
-        if (rawBitmaps.isEmpty() || width <= 0 || height <= 0) return
+        if (frameResIds.isEmpty() || width <= 0 || height <= 0) return
 
+        cachedCharWidth = paintText.measureText("W").coerceAtLeast(1f)
+        cachedCharHeight = (paintText.textSize * 1.2f).coerceAtLeast(1f)
 
-        val charWidth = paintText.measureText("W")
-        val charHeight = paintText.textSize * 1.2f
-
-        val targetCols = (width / charWidth).toInt()
-        val targetRows = (height / charHeight).toInt()
-
+        val targetCols = (width / cachedCharWidth).toInt()
+        val targetRows = (height / cachedCharHeight).toInt()
         if (targetCols <= 0 || targetRows <= 0) return
 
-        grayMapsList.clear()
-        for (bmp in rawBitmaps) {
-            val scale = minOf(targetCols * charWidth / bmp.width, targetRows * charHeight / bmp.height)
-            val scaledWidth = (bmp.width * scale / charWidth).toInt().coerceIn(1, targetCols)
-            val scaledHeight = (bmp.height * scale / charHeight).toInt().coerceIn(1, targetRows)
+        gridCols = targetCols
+        gridRows = targetRows
 
-            val scaledBitmap = Bitmap.createScaledBitmap(bmp, scaledWidth, scaledHeight, true)
+        val cacheByResId = HashMap<Int, ByteArray>()
+        val result = ArrayList<ByteArray>(frameResIds.size)
 
-            // Creamos una cuadrícula completa del tamaño de la pantalla y centramos la imagen procesada
-            val grayMap = Array(targetRows) { IntArray(targetCols) { 255 } } // 255 = fondo vacío
+        for (resId in frameResIds) {
+            val existing = cacheByResId[resId]
+            if (existing != null) {
+                result.add(existing)
+                continue
+            }
 
+            val bmp = decodeCompactBitmap(resId, targetCols, targetRows) ?: continue
+            val grayMap = try {
+                buildGrayMap(bmp, targetCols, targetRows)
+            } finally {
+                if (!bmp.isRecycled) bmp.recycle()
+            }
+            cacheByResId[resId] = grayMap
+            result.add(grayMap)
+        }
+
+        grayMapsList = result
+    }
+
+    private fun decodeCompactBitmap(resId: Int, targetCols: Int, targetRows: Int): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeResource(resources, resId, bounds)
+        if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+            val opts = BitmapFactory.Options().apply {
+                inPreferredConfig = Bitmap.Config.RGB_565
+                var sample = 1
+                while (bounds.outWidth / (sample * 2) >= targetCols * 2 &&
+                    bounds.outHeight / (sample * 2) >= targetRows * 2
+                ) {
+                    sample *= 2
+                }
+                inSampleSize = sample
+            }
+            BitmapFactory.decodeResource(resources, resId, opts)?.let { return it }
+        }
+        return ContextCompat.getDrawable(context, resId)?.toBitmap(
+            width = targetCols.coerceAtLeast(1),
+            height = targetRows.coerceAtLeast(1),
+            config = Bitmap.Config.RGB_565
+        )
+    }
+
+    private fun buildGrayMap(bmp: Bitmap, targetCols: Int, targetRows: Int): ByteArray {
+        val scale = minOf(
+            targetCols * cachedCharWidth / bmp.width,
+            targetRows * cachedCharHeight / bmp.height
+        )
+        val scaledWidth = (bmp.width * scale / cachedCharWidth).toInt().coerceIn(1, targetCols)
+        val scaledHeight = (bmp.height * scale / cachedCharHeight).toInt().coerceIn(1, targetRows)
+
+        val scaledBitmap = Bitmap.createScaledBitmap(bmp, scaledWidth, scaledHeight, true)
+        val grayMap = ByteArray(targetRows * targetCols) { 0xFF.toByte() }
+        val pixels = IntArray(scaledWidth * scaledHeight)
+        try {
+            scaledBitmap.getPixels(pixels, 0, scaledWidth, 0, 0, scaledWidth, scaledHeight)
             val offsetY = (targetRows - scaledHeight) / 2
             val offsetX = (targetCols - scaledWidth) / 2
 
             for (y in 0 until scaledHeight) {
+                val rowOffset = (y + offsetY) * targetCols + offsetX
+                val srcOffset = y * scaledWidth
                 for (x in 0 until scaledWidth) {
-                    val pixel = scaledBitmap.getPixel(x, y)
-                    val red = Color.red(pixel)
-                    val green = Color.green(pixel)
-                    val blue = Color.blue(pixel)
-                    val gray = (0.299 * red + 0.587 * green + 0.114 * blue).toInt()
-
-                    val targetY = y + offsetY
-                    val targetX = x + offsetX
-                    if (targetY in grayMap.indices && targetX in grayMap[0].indices) {
-                        grayMap[targetY][targetX] = gray
-                    }
+                    val pixel = pixels[srcOffset + x]
+                    val red = (pixel shr 16) and 0xFF
+                    val green = (pixel shr 8) and 0xFF
+                    val blue = pixel and 0xFF
+                    val gray = (red * 77 + green * 150 + blue * 29) shr 8
+                    grayMap[rowOffset + x] = gray.toByte()
                 }
             }
-            if (scaledBitmap !== bmp) scaledBitmap.recycle()
-            grayMapsList.add(grayMap)
+        } finally {
+            if (scaledBitmap !== bmp && !scaledBitmap.isRecycled) scaledBitmap.recycle()
         }
+        return grayMap
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
-        grayMapsList.clear()
+        grayMapsList = emptyList()
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        setAnimationRunning(true)
+    }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        setAnimationRunning(visibility == VISIBLE)
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        canvas.drawColor(Color.BLACK)
 
         if (grayMapsList.isEmpty()) {
             processBitmapsOnce()
@@ -196,120 +261,94 @@ class MatrixSkullView @JvmOverloads constructor(
         }
 
         val currentGrayMap = grayMapsList[currentFrameIndex]
+        val rows = gridRows
+        val cols = gridCols
+        if (rows <= 0 || cols <= 0) return
 
         val currentTime = System.currentTimeMillis()
         val elapsed = currentTime - viewCreationTime
         val initialFadeFactor = (elapsed / initialFadeDurationMillis.toFloat()).coerceIn(0f, 1f)
 
-        // Verificamos inactividad extrema de Mon
         val idleMillis = currentTime - lastActivityTime
-        val idleThresholdMillis = 27 * 1000L // 15 segundos de inactividad para que empiece el glitch bizarro
+        val idleThresholdMillis = 27_000L
 
-        // Entramos en ventana de inactividad 
         if (idleMillis > idleThresholdMillis) {
             if (!isBizarreIdleGlitchActive && currentTime > bizarreGlitchEndTime) {
-                // Probabilidad de que de la nada inicie un glitch bizarro
-                if (Random.nextFloat() < 0.05f) { // Se evalúa en cada frame, así que iniciará pronto
+                if (Random.nextFloat() < 0.05f) {
                     isBizarreIdleGlitchActive = true
-                    // Durará entre 2 y 7 segundos
-                    val duration = Random.nextLong(1000L, 2700L)
-                    bizarreGlitchEndTime = currentTime + duration
-                    MonLogger.i("MatrixSkullView", "onDraw: INICIANDO glitch bizarro por inactividad. Durará ${duration/1000f} segundos.")
+                    bizarreGlitchEndTime = currentTime + Random.nextLong(1000L, 2700L)
                 }
             } else if (isBizarreIdleGlitchActive && currentTime > bizarreGlitchEndTime) {
-                // Se acabó el tiempo del glitch
                 isBizarreIdleGlitchActive = false
-                val delayNext = Random.nextLong(3000L, 7000L)
-                bizarreGlitchEndTime = currentTime + delayNext 
-                MonLogger.i("MatrixSkullView", "onDraw: TERMINANDO glitch bizarro. Próximo en al menos ${delayNext/1000f} segundos.")
+                bizarreGlitchEndTime = currentTime + Random.nextLong(3000L, 7000L)
             }
         } else {
-            if (isBizarreIdleGlitchActive) {
-                 MonLogger.d("MatrixSkullView", "onDraw: Forzando fin de glitch bizarro porque salimos de la ventana (idleMillis = $idleMillis).")
-            }
             isBizarreIdleGlitchActive = false
             bizarreGlitchEndTime = 0L
         }
 
-        val charWidth = paintText.measureText("W")
-        val charHeight = paintText.textSize * 1.2f
+        val charWidth = cachedCharWidth
+        val charHeight = cachedCharHeight
+        val rampLen = asciiRamp.length
+        val matrixLen = matrixChars.length
 
-        val rows = currentGrayMap.size
-        val cols = if (rows > 0) currentGrayMap[0].size else 0
-        
-        // Calculamos variables de Glitch Analógico (Módem) antes de recorrer los píxeles
-        val analogInterferenceActive = isModemSoundActive && Random.nextFloat() < 0.4f // 40% de los frames tendrán glitch
+        val analogInterferenceActive = isModemSoundActive && Random.nextFloat() < 0.4f
         val glitchBlockStartY = if (analogInterferenceActive) Random.nextInt(0, rows) else -1
-        val glitchBlockHeight =
-            if (analogInterferenceActive) Random.nextInt(2, 10) else 0 // Afecta un bloque de filas
-        val analogShift =
-            if (analogInterferenceActive) (Random.nextFloat() * 80 - 40).toInt() else 0 // Desfase horizontal
-        val useGlitchColor = analogInterferenceActive && Random.nextFloat() < 0.3f // 30% de las veces será blanco o rojo
-        
-        // Calculamos variables de Glitch Bizarro por Inactividad Extrema
-        val bizarreInterferenceActive = isBizarreIdleGlitchActive && Random.nextFloat() < 0.1f // Parpadeo bizarro al azar
-        val bizarreInvertMap = isBizarreIdleGlitchActive && Random.nextBoolean() // Cambiar sombras por luces
-        val bizarreAsciiShift = if (isBizarreIdleGlitchActive) Random.nextInt(0, asciiRamp.length) else 0
+        val glitchBlockHeight = if (analogInterferenceActive) Random.nextInt(2, 10) else 0
+        val analogShift = if (analogInterferenceActive) (Random.nextFloat() * 80 - 40).toInt() else 0
+        val useGlitchColor = analogInterferenceActive && Random.nextFloat() < 0.3f
+
+        val bizarreInterferenceActive = isBizarreIdleGlitchActive && Random.nextFloat() < 0.1f
+        val bizarreInvertMap = isBizarreIdleGlitchActive && Random.nextBoolean()
+        val bizarreAsciiShift = if (isBizarreIdleGlitchActive) Random.nextInt(0, rampLen) else 0
 
         for (y in 0 until rows) {
-            // Evaluamos si la fila actual cae dentro del bloque afectado por el "tearing" analógico
             val isRowGlitched = analogInterferenceActive && y >= glitchBlockStartY && y < (glitchBlockStartY + glitchBlockHeight)
-            // Si está inactiva y bizarra, aplicamos distorsión ondulada usando seno sobre Y
-            val bizarreWaveShift = if (bizarreInterferenceActive) (Math.sin(y.toDouble() / 5.0) * 40).toInt() else 0
-            
+            val bizarreWaveShift = if (bizarreInterferenceActive) (sin(y / 5.0) * 40).toInt() else 0
             val currentAnalogShift = if (isRowGlitched) analogShift else 0
-            
-            for (x in 0 until cols) {
-                val baseGray = if (bizarreInvertMap) 255 - currentGrayMap[y][x] else currentGrayMap[y][x]
-                
-                // Aplicamos el desfase (shift) a la coordenada X si la fila está glitcheada y onda bizarra
-                val posX = x * charWidth + currentAnalogShift + bizarreWaveShift
-                val posY = y * charHeight + charHeight
+            val posY = y * charHeight + charHeight
+            val rowOffset = y * cols
 
-                if (Random.nextFloat() < 0.15) {
-                    val randomChar = matrixChars[Random.nextInt(matrixChars.length)]
-                    canvas.drawText(randomChar.toString(), posX, posY, paintText)
+            for (x in 0 until cols) {
+                val rawGray = currentGrayMap[rowOffset + x].toInt() and 0xFF
+                val baseGray = if (bizarreInvertMap) 255 - rawGray else rawGray
+                val posX = x * charWidth + currentAnalogShift + bizarreWaveShift
+
+                if (Random.nextFloat() < 0.13f) {
+                    charBuf[0] = matrixChars[Random.nextInt(matrixLen)]
+                    canvas.drawText(charBuf, 0, 1, posX, posY, paintText)
                 }
 
                 if (baseGray < 240) {
-                    val noise = (Random.nextFloat() * 12 - 6).toInt()
+                    val noise = (Random.nextFloat() * 12f - 6f).toInt()
                     val dynamicGray = (baseGray + noise).coerceIn(0, 255)
 
-                    var index = (dynamicGray * (asciiRamp.length - 1)) / 255
+                    var index = (dynamicGray * (rampLen - 1)) / 255
                     if (isBizarreIdleGlitchActive) {
-                        index = (index + bizarreAsciiShift) % asciiRamp.length
+                        index = (index + bizarreAsciiShift) % rampLen
                     }
-                    val asciiChar = asciiRamp[index]
 
                     val constantInterference = if (Random.nextFloat() < 0.25f) {
                         Random.nextFloat() * 0.4f + 0.5f
                     } else {
                         Random.nextFloat() * 0.15f + 0.85f
                     }
-                    
-                    // Fade out extremo (la calavera casi desaparece mientras piensa)
-                    val fadeGlichFactor = if (isModemSoundActive && Random.nextFloat() < 0.75f) {
-                        0.1f 
-                    } else {
-                        1.0f 
-                    }
-                    
-                    // Parpadeo agresivo de inactividad
+                    val fadeGlitchFactor = if (isModemSoundActive && Random.nextFloat() < 0.75f) 0.1f else 1.0f
                     val bizarreFadeFactor = if (bizarreInterferenceActive && Random.nextFloat() < 0.5f) 0.0f else 1.0f
-
-                    val combinedVisibility = initialFadeFactor * constantInterference * fadeGlichFactor * bizarreFadeFactor
+                    val combinedVisibility = initialFadeFactor * constantInterference * fadeGlitchFactor * bizarreFadeFactor
 
                     if (Random.nextFloat() < combinedVisibility) {
                         val activePaint = if (isRowGlitched && useGlitchColor) {
                             paintGlitch.color = if (Random.nextBoolean()) Color.WHITE else Color.RED
                             paintGlitch
                         } else if (bizarreInterferenceActive) {
-                            paintGlitch.color = if (Random.nextFloat() < 0.05f) Color.parseColor("#00FF41") else skullColor
+                            paintGlitch.color = if (Random.nextFloat() < 0.05f) 0xFF00FF41.toInt() else skullColor
                             paintGlitch
                         } else {
                             paintSkull
                         }
-                        canvas.drawText(asciiChar.toString(), posX, posY, activePaint)
+                        charBuf[0] = asciiRamp[index]
+                        canvas.drawText(charBuf, 0, 1, posX, posY, activePaint)
                     }
                 }
             }
@@ -318,7 +357,6 @@ class MatrixSkullView @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
-        handler.removeCallbacks(runnable)
+        setAnimationRunning(false)
     }
 }
-

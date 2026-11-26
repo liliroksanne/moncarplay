@@ -216,16 +216,24 @@ class MatrixDialogueBox @JvmOverloads constructor(
         showCurrentLine(slowDown)
     }
 
+    private var currentSpeedMillis: Long = 77L
+    private val typingRunnable = object : Runnable {
+        override fun run() {
+            typeNextChar(currentSpeedMillis)
+        }
+    }
+
     private fun showCurrentLine(slowDown: Boolean) {
+        handler.removeCallbacks(typingRunnable)
         if (currentLineIndex < dialogueLines.size) {
             textView.text = ""
             currentCharIndex = 0
             textView.scrollTo(0, 0)
 
             val currentLine = dialogueLines[currentLineIndex]
-            val calculatedSpeed = calculateDynamicSpeed(currentLine.length, slowDown)
+            currentSpeedMillis = calculateDynamicSpeed(currentLine.length, slowDown)
 
-            typeNextChar(calculatedSpeed)
+            typeNextChar(currentSpeedMillis)
         } else {
             onDialogueFinished?.invoke()
         }
@@ -270,7 +278,7 @@ class MatrixDialogueBox @JvmOverloads constructor(
 
             currentCharIndex++
 
-            handler.postDelayed({ typeNextChar(speedMillis) }, speedMillis)
+            handler.postDelayed(typingRunnable, speedMillis)
         }
     }
 

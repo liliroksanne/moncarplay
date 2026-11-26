@@ -12,8 +12,8 @@ android {
         applicationId = "com.lilyroksanne.mon"
         minSdk = 27
         targetSdk = 37
-        versionCode = 5
-        versionName = "2.6.0"
+        versionCode = 6
+        versionName = "2.7.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         

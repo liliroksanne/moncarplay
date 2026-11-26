@@ -161,7 +161,7 @@ object MonLogger {
     fun d(className: String, message: String) {
         val color = getColorForClass(className)
         Log.d(GLOBAL_TAG, "$color[$className] $message$ANSI_RESET")
-        writeToFile("DEBUG", className, message)
+        // Omitimos escribir DEBUG a disco para ahorrar RAM, corrutinas y I/O en estéreos CarPlay
     }
 
     fun w(className: String, message: String) {
