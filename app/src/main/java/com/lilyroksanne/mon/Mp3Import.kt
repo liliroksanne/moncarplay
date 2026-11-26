@@ -47,6 +47,8 @@ internal class Mp3Import(private val context: Context) {
                     retriever.setDataSource(pending.path)
                     retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE) to
                         retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_GENRE)
+                } finally {
+                    retriever.release()
                 }
             }.getOrNull()
             val title = metadata?.first?.trim()?.takeIf(String::isNotEmpty)
@@ -78,4 +80,5 @@ internal class Mp3Import(private val context: Context) {
         }
     }
 }
+
 

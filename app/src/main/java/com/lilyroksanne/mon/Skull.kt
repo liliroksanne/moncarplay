@@ -8,9 +8,11 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.os.Bundle
 import android.os.Bundle as OSBundle
 import android.speech.RecognitionListener
@@ -40,10 +42,10 @@ import androidx.lifecycle.lifecycleScope
 import com.lilyroksanne.mon.util.MonLogger
 import com.lilyroksanne.mon.util.HardwareKeyboardHelper
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -51,17 +53,41 @@ import java.util.Locale
 class Skull : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private val importMp3 = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        viewModel.music.addFiles(uris)?.let { message ->
-            android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_LONG).show()
+        importTracks(uris)
+    }
+
+    private fun importTracks(uris: List<android.net.Uri>) {
+        if (uris.isEmpty()) return
+        lifecycleScope.launch {
+            viewModel.music.addFiles(uris)?.let { message ->
+                android.widget.Toast.makeText(this@Skull, message, android.widget.Toast.LENGTH_LONG).show()
+            }
         }
     }
 
+    private fun receiveSharedMp3(intent: Intent) {
+        val streams = when (intent.action) {
+            Intent.ACTION_VIEW -> listOfNotNull(intent.data)
+            Intent.ACTION_SEND -> listOfNotNull(
+                androidx.core.content.IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, android.net.Uri::class.java)
+            )
+            Intent.ACTION_SEND_MULTIPLE ->
+                androidx.core.content.IntentCompat.getParcelableArrayListExtra(
+                    intent, Intent.EXTRA_STREAM, android.net.Uri::class.java
+                ).orEmpty()
+            else -> return
+        }
+        val clip = intent.clipData
+        val clips = (0 until (clip?.itemCount ?: 0)).mapNotNull { clip?.getItemAt(it)?.uri }
+        importTracks((streams + clips).filter { it.scheme == "content" })
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        receiveSharedMp3(intent)
+    }
+
     private val musicDownloads by lazy { MusicDownloads(applicationContext) }
-    private val httpsLink = Regex("""https://[^\s<>"]+""", RegexOption.IGNORE_CASE)
-    private val searchCommand = Regex(
-        """^(?:mon[, ]+)?(?:busca(?:me)?(?: y descarga)?|búscame|descarga)\s+(?:la canci[oó]n\s+)?(.+?)[.!?]*$""",
-        RegexOption.IGNORE_CASE
-    )
 
     private val TAG = "SkullActivity"
     private val viewModel: MainViewModel by viewModels()
@@ -81,6 +107,7 @@ class Skull : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var speechRecognizer: SpeechRecognizer? = null
     private var isListening = false
     private var isAiBusy = false
+    private var awaitingDownloadTitle = false
 
     private val sentMessagesHistory = mutableListOf<String>()
 
@@ -310,23 +337,41 @@ class Skull : AppCompatActivity(), TextToSpeech.OnInitListener {
             }
         }
 
+        val micRow = FrameLayout(this)
         micButton = Button(this).apply {
-            text = "Micrófono"
+            layoutParams = FrameLayout.LayoutParams(dpToPx(208), dpToPx(88), Gravity.CENTER_HORIZONTAL)
+            text = "Hablar"
+            contentDescription = "Hablar con Mon"
             isAllCaps = false
-            textSize = 13f
+            textSize = 20f
             typeface = Typeface.MONOSPACE
             setTextColor(Color.WHITE)
-            backgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#5A189A"))
+            val micIcon = ContextCompat.getDrawable(this@Skull, R.drawable.ic_mic_mon)
+            setCompoundDrawablesWithIntrinsicBounds(null, micIcon, null, null)
+            compoundDrawablePadding = dpToPx(4)
+            setPadding(dpToPx(12), dpToPx(10), dpToPx(12), dpToPx(8))
+            val fill = GradientDrawable().apply {
+                cornerRadius = dpToPxf(30f)
+                color = ColorStateList(
+                    arrayOf(intArrayOf(-android.R.attr.state_enabled), intArrayOf()),
+                    intArrayOf(Color.rgb(75, 51, 95), Color.rgb(120, 41, 172))
+                )
+                setStroke(dpToPx(2), Color.rgb(223, 155, 248))
+            }
+            background = RippleDrawable(ColorStateList.valueOf(0x55FFFFFF), fill, null)
             setOnClickListener {
                 if (isListening) stopListening() else checkPermissionAndStartListening()
             }
         }
-        inputContainer.addView(micButton)
+        micRow.addView(micButton)
         inputContainer.addView(etUserInput)
         inputContainer.addView(sendButton)
 
         bottomWrapper.addView(topControlsLayout)
         bottomWrapper.addView(tvLastMessages)
+        bottomWrapper.addView(micRow, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = dpToPx(12) })
         bottomWrapper.addView(inputContainer)
         // Configurar detección de teclado físico (T9 / QWERTY) al iniciar
         HardwareKeyboardHelper.setupHardwareKeyboard(
@@ -338,48 +383,44 @@ class Skull : AppCompatActivity(), TextToSpeech.OnInitListener {
         rootLayout.addView(bottomWrapper)
         dashboard.addView(rootLayout)
         dashboard.addView(musicPanel)
-        dashboard.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, _, oldRight, _ ->
-            val wide = right - left >= dpToPx(540) && right - left > bottom - top
-            val orientation = if (wide) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
-            if (rootLayout.layoutParams !is LinearLayout.LayoutParams ||
-                (rootLayout.layoutParams as LinearLayout.LayoutParams).weight == 0f ||
-                dashboard.orientation != orientation
-            ) {
-                dashboard.orientation = orientation
-                rootLayout.layoutParams = if (wide) {
-                    LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+        var previousPanelWidth = -1
+        dashboard.addOnLayoutChangeListener { _, left, top, right, bottom, _, _, _, _ ->
+            val width = right - left
+            val wide = width >= dpToPx(540) && width > bottom - top
+            val panelWidth = if (wide) (width * 0.30f).toInt().coerceAtMost(dpToPx(360)) else 0
+            if (panelWidth != previousPanelWidth) {
+                previousPanelWidth = panelWidth
+                dashboard.orientation = if (wide) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+                if (wide) {
+                    rootLayout.bringToFront()
+                    rootLayout.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+                    musicPanel.layoutParams = LinearLayout.LayoutParams(panelWidth, LinearLayout.LayoutParams.MATCH_PARENT)
                 } else {
-                    LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
-                }
-                musicPanel.layoutParams = if (wide) {
-                    LinearLayout.LayoutParams(
-                        ((right - left) * 0.38f).toInt().coerceAtMost(dpToPx(480)),
-                        LinearLayout.LayoutParams.MATCH_PARENT
-                    )
-                } else {
-                    LinearLayout.LayoutParams(
+                    musicPanel.bringToFront()
+                    rootLayout.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+                    musicPanel.layoutParams = LinearLayout.LayoutParams(
                         LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
                     )
                 }
-            } else if (wide && right - left != oldRight - oldLeft) {
-                musicPanel.layoutParams = LinearLayout.LayoutParams(
-                    ((right - left) * 0.38f).toInt().coerceAtMost(dpToPx(480)),
-                    LinearLayout.LayoutParams.MATCH_PARENT
-                )
+                micButton.translationX = -panelWidth / 2f
             }
         }
         ViewCompat.setOnApplyWindowInsetsListener(dashboard) { _, insets ->
             val safe = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
             dashboard.setPadding(safe.left, safe.top, safe.right, maxOf(safe.bottom, ime))
-            musicPanel.visibility = if (insets.isVisible(WindowInsetsCompat.Type.ime())) {
+            val controlsVisibility = if (insets.isVisible(WindowInsetsCompat.Type.ime())) {
                 android.view.View.GONE
             } else {
                 android.view.View.VISIBLE
             }
+            musicPanel.visibility = controlsVisibility
+            micRow.visibility = controlsVisibility
             insets
         }
         setContentView(dashboard)
+        DriveSyncJob.schedule(applicationContext)
+        if (savedInstanceState == null) receiveSharedMp3(intent)
         lifecycleScope.launch {
             MonLogger.d(TAG, "onCreate: Consultando repositorio de memoria para cargar historial inicial")
 
@@ -464,7 +505,8 @@ class Skull : AppCompatActivity(), TextToSpeech.OnInitListener {
         val recognizer = speechRecognizer ?: return
         hideKeyboard()
         isListening = true
-        micButton.text = "Cancelar"
+        micButton.text = "Escuchando"
+        micButton.contentDescription = "Escuchando. Toca para cancelar"
         try {
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -487,7 +529,8 @@ class Skull : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private fun resetMicrophone() {
         isListening = false
-        micButton.text = "Micrófono"
+        micButton.text = "Hablar"
+        micButton.contentDescription = "Hablar con Mon"
         etUserInput.hint = "Escribe un mensaje..."
     }
     override fun onInit(status: Int) {
@@ -672,6 +715,8 @@ class Skull : AppCompatActivity(), TextToSpeech.OnInitListener {
         runOnUiThread {
             etUserInput.isEnabled = enabled
             micButton.isEnabled = enabled
+            micButton.text = if (enabled) "Hablar" else "Espera…"
+            micButton.contentDescription = if (enabled) "Hablar con Mon" else "Mon está procesando"
             if (!enabled) {
                 stopListening()
                 isAiBusy = true
@@ -723,7 +768,7 @@ class Skull : AppCompatActivity(), TextToSpeech.OnInitListener {
 
             val dateFormat = SimpleDateFormat("yyMMdd-HHmmss", Locale.getDefault())
             val timestamp = dateFormat.format(Date())
-            val linuxLine = "lily[$timestamp]$ ${httpsLink.replace(input, "[enlace de música]")}"
+            val linuxLine = "lily[$timestamp]$ $input"
 
             lifecycleScope.launch {
                 viewModel.memoryRepo.saveChatMessage("lily", linuxLine)
@@ -742,17 +787,18 @@ class Skull : AppCompatActivity(), TextToSpeech.OnInitListener {
         setInputState(false)
 
         aiJob = lifecycleScope.launch {
-            val link = httpsLink.find(input)?.value
-            val search = searchCommand.matchEntire(input)?.groupValues?.get(1)
-            if (link != null) {
-                downloadMusic(link)
-                return@launch
-            }
-            if (search != null) {
-                findMusic(search)
-                return@launch
-            }
             val command = RoadChat.command(input)
+            val query = RoadChat.downloadQuery(input)
+            if (query != null || (awaitingDownloadTitle && command == null)) {
+                awaitingDownloadTitle = false
+                if (query == null && input.equals("cancela", ignoreCase = true)) {
+                    sayDownloadStatus("Va, cancelé la descarga.")
+                } else {
+                    findDownload(query ?: input)
+                }
+                return@launch
+            }
+            awaitingDownloadTitle = false
             val music = viewModel.music
             val response = when {
                 command == null -> RoadChat.reply(input)
@@ -783,60 +829,84 @@ class Skull : AppCompatActivity(), TextToSpeech.OnInitListener {
             }
         }
     }
-    private suspend fun findMusic(query: String) {
-        dialogueBox.startDialogue(listOf("Buscando en Wikimedia Commons..."))
+    private suspend fun findDownload(query: String) {
+        if (query.isBlank()) {
+            awaitingDownloadTitle = true
+            sayDownloadStatus("¿Qué canción quieres que descargue, Lily?")
+            return
+        }
+        if (query.lowercase(Locale.ROOT) in setOf("todas", "todo", "todas las canciones", "todas las rolas")) {
+            syncDriveNow()
+            return
+        }
+        dialogueBox.startDialogue(listOf("Buscando «$query» en tu carpeta de Drive..."))
         try {
-            val results = withContext(Dispatchers.IO) { musicDownloads.search(query.take(150)) }
-            if (results.isEmpty()) {
-                showReply("No encontré esa canción en el catálogo.")
-            } else if (results.size == 1) {
-                val match = results.single()
-                downloadMusic(match.url, match.title)
-            } else {
-                showReply("Encontré varias pistas. Elige cuál descargar.")
-                if (!isAppInForeground) return
-                androidx.appcompat.app.AlertDialog.Builder(this)
-                    .setTitle("Resultados de Wikimedia Commons")
-                    .setItems(results.map { it.title }.toTypedArray()) { _, index ->
-                        val match = results[index]
-                        aiJob?.cancel()
-                        setInputState(false)
-                        aiJob = lifecycleScope.launch { downloadMusic(match.url, match.title) }
-                    }
-                    .setNegativeButton("Cancelar", null)
-                    .show()
+            val matches = withContext(Dispatchers.IO) { musicDownloads.search(query) }
+            when {
+                matches.isEmpty() -> sayDownloadStatus("No encontré «$query» en tu carpeta de Drive.")
+                matches.size == 1 -> saveDownload(matches.first())
+                isAppInForeground -> {
+                    setInputState(true)
+                    dialogueBox.startDialogue(listOf("Encontré varias pistas. Elige cuál guardar."))
+                    androidx.appcompat.app.AlertDialog.Builder(this)
+                        .setTitle("¿Cuál quieres descargar?")
+                        .setItems(matches.map { it.title }.toTypedArray()) { _, choice ->
+                            setInputState(false)
+                            aiJob = lifecycleScope.launch { saveDownload(matches[choice]) }
+                        }
+                        .setNegativeButton("Cancelar", null)
+                        .show()
+                }
+                else -> setInputState(true)
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
-            MonLogger.e(TAG, "Falló la búsqueda de audio", error)
-            showReply("No pude buscar música. Revisa la conexión del estéreo.")
+            MonLogger.e(TAG, "No se pudo buscar en Drive", error)
+            sayDownloadStatus("No pude buscar la canción. Revisa la conexión a Internet.")
         }
     }
 
-    private suspend fun downloadMusic(url: String, title: String? = null) {
-        dialogueBox.startDialogue(listOf("Descargando audio..."))
+    private suspend fun syncDriveNow() {
+        dialogueBox.startDialogue(listOf("Revisando tu carpeta de Drive..."))
         try {
-            val (file, label) = withContext(Dispatchers.IO) { musicDownloads.download(url, title) }
-            viewModel.music.addDownload(file, label)
-            showReply("Listo, Lily. Ya está en la biblioteca.")
+            val complete = withContext(Dispatchers.IO) { musicDownloads.sync() }
+            sayDownloadStatus(if (complete) {
+                "Terminé de revisar Drive. Abre Biblioteca para ver tus rolas."
+            } else {
+                "Algunas pistas no se pudieron guardar. Lo intentaré en la próxima revisión."
+            })
         } catch (cancelled: CancellationException) {
             throw cancelled
-        } catch (error: LinkageError) {
-            MonLogger.e(TAG, "El conversor no es compatible con el dispositivo", error)
-            showReply("Este equipo no pudo cargar el conversor a MP3.")
         } catch (error: Exception) {
-            val message = if (error is IllegalArgumentException || error is IllegalStateException) {
-                error.message
-            } else null
-            showReply(message ?: "No pude descargar ese audio. Revisa la conexión y el enlace.")
+            MonLogger.e(TAG, "No se pudo sincronizar Drive", error)
+            sayDownloadStatus("No pude abrir tu carpeta pública de Drive. Revisa la conexión.")
         }
     }
 
-    private fun showReply(response: String) {
+    private suspend fun saveDownload(result: MusicDownloads.Result) {
+        dialogueBox.startDialogue(listOf("Descargando «${result.title}»..."))
+        try {
+            val track = withContext(Dispatchers.IO) { musicDownloads.download(result) }
+            viewModel.music.addDownload(track)
+            val message = if (track.added) {
+                "Guardé «${track.title}» en tu biblioteca."
+            } else {
+                "«${track.title}» ya está en tu biblioteca."
+            }
+            sayDownloadStatus(message)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            MonLogger.e(TAG, "No se pudo descargar la pista", error)
+            sayDownloadStatus("No pude guardar esa pista. Prueba con otra versión.")
+        }
+    }
+
+    private fun sayDownloadStatus(message: String) {
         if (isAppInForeground) {
-            dialogueBox.startDialogue(listOf(response))
-            speakLoquendo(response)
+            dialogueBox.startDialogue(listOf(message))
+            speakLoquendo(message)
         } else {
             setInputState(true)
         }
@@ -848,7 +918,3 @@ class Skull : AppCompatActivity(), TextToSpeech.OnInitListener {
         imm.hideSoftInputFromWindow(etUserInput.windowToken, 0)
     }
 }
-
-
-
-

@@ -28,14 +28,59 @@ internal class Mp3Panel(
         if (music.isActive) music.pause() else music.play()
     }
     private val next = playerButton("⏭", "Siguiente pista") { music.step(1) }
-    private val library = playerButton("Biblioteca", "Abrir biblioteca de MP3") {
+    private val library = playerButton("Biblioteca", "Abrir biblioteca por género", ::showLibrary)
+
+    private fun showLibrary() {
+        val genres = music.genres
         AlertDialog.Builder(context)
-            .setTitle("Biblioteca MP3")
-            .setItems(music.titles.toTypedArray()) { _, position -> music.select(position) }
+            .setTitle("Biblioteca de música")
+            .setItems((listOf("Todas las rolas") + genres).toTypedArray()) { _, choice ->
+                showTracks(genres.getOrNull(choice - 1))
+            }
+            .setNeutralButton("Editar género") { _, _ -> chooseTrackToEdit() }
             .setNegativeButton("Cerrar", null)
             .show()
     }
 
+    private fun showTracks(genre: String?) {
+        val tracks = music.entries(genre)
+        AlertDialog.Builder(context)
+            .setTitle(genre ?: "Todas las rolas")
+            .setItems(tracks.map { it.title }.toTypedArray()) { _, choice ->
+                music.select(tracks[choice].position, genre)
+            }
+            .setNegativeButton("Volver") { _, _ -> showLibrary() }
+            .show()
+    }
+
+    private fun chooseTrackToEdit() {
+        val tracks = music.entries(null)
+        AlertDialog.Builder(context)
+            .setTitle("Elige una rola")
+            .setItems(tracks.map { "${it.title} · ${it.genre}" }.toTypedArray()) { _, choice ->
+                editGenre(tracks[choice])
+            }
+            .setNegativeButton("Volver") { _, _ -> showLibrary() }
+            .show()
+    }
+
+    private fun editGenre(entry: LocalMp3Player.LibraryEntry) {
+        val editor = android.widget.EditText(context).apply {
+            isSingleLine = true
+            hint = "Género"
+            setText(entry.genre)
+            selectAll()
+        }
+        AlertDialog.Builder(context)
+            .setTitle(entry.title)
+            .setView(editor)
+            .setPositiveButton("Guardar") { _, _ ->
+                music.setGenre(entry.position, editor.text.toString())
+                showLibrary()
+            }
+            .setNegativeButton("Cancelar") { _, _ -> showLibrary() }
+            .show()
+    }
     init {
         orientation = VERTICAL
         gravity = Gravity.CENTER_VERTICAL
@@ -47,7 +92,10 @@ internal class Mp3Panel(
         addView(label(14f, accent).apply { text = "MÚSICA LOCAL" })
         addView(track, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
         addView(status, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
-        addRow(previous, toggle, next)
+        previous.textSize = 23f
+        toggle.textSize = 26f
+        next.textSize = 23f
+        addRow(previous, toggle, next, height = 68)
         addRow(playerButton("Agregar MP3", "Agregar MP3") { addFiles() }, library)
         music.onChange = ::refresh
         refresh()
@@ -57,9 +105,9 @@ internal class Mp3Panel(
         val title = music.currentTitle
         track.text = title ?: "Sin pistas"
         status.text = music.error ?: if (title == null) {
-            "Elige archivos del estéreo o de una USB."
+            "Importa MP3 o pide «descarga» y el nombre de la canción."
         } else {
-            "${music.positionLabel} · ${if (music.isActive) "Reproduciendo" else "En pausa"}"
+            "${music.currentGenre} · ${music.positionLabel} · ${if (music.isActive) "Reproduciendo" else "En pausa"}"
         }
         previous.isEnabled = title != null
         toggle.isEnabled = title != null
@@ -69,15 +117,15 @@ internal class Mp3Panel(
         toggle.contentDescription = if (music.isActive) "Pausar" else "Reproducir"
     }
 
-    private fun addRow(vararg buttons: Button) {
+    private fun addRow(vararg buttons: Button, height: Int = 52) {
         val row = LinearLayout(context)
         buttons.forEachIndexed { index, button ->
-            row.addView(button, LayoutParams(0, dp(48), 1f).apply {
-                if (index > 0) marginStart = dp(6)
+            row.addView(button, LayoutParams(0, dp(height), 1f).apply {
+                if (index > 0) marginStart = dp(8)
             })
         }
         addView(row, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-            topMargin = dp(6)
+            topMargin = dp(8)
         })
     }
 

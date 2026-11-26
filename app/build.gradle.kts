@@ -12,8 +12,8 @@ android {
         applicationId = "com.lilyroksanne.mon"
         minSdk = 27
         targetSdk = 37
-        versionCode = 3
-        versionName = "2.4.0"
+        versionCode = 5
+        versionName = "2.6.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         
@@ -38,7 +38,6 @@ base {
 }
 
 dependencies {
-    implementation("mobi.cangol.mobile:lame:1.0.1")
     // Corrutinas (requeridas para usar delay y llamadas asíncronas)
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     // DocumentFile para manejar SAF
@@ -59,4 +58,3 @@ dependencies {
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(libs.androidx.junit)
 }
-

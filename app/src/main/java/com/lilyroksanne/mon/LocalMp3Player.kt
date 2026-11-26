@@ -23,6 +23,10 @@ internal class LocalMp3Player(
     data class LibraryEntry(val position: Int, val title: String, val genre: String)
 
     private val importer = Mp3Import(context)
+    private val drive = MusicDownloads(context)
+    private val driveUpdates = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        key?.let(drive::savedTrack)?.let(::addDownload)
+    }
     private val importLock = Mutex()
     private var queueGenre: String? = null
 
@@ -62,6 +66,8 @@ internal class LocalMp3Player(
             val title = entry.optString("title")
             if (uri.isNotBlank() && title.isNotBlank()) library.add(Track(Uri.parse(uri), title, cleanGenre(entry.optString("genre"))))
         }
+        drive.savedTracks().forEach(::addDownload)
+        drive.index.registerOnSharedPreferenceChangeListener(driveUpdates)
         index = preferences.getInt("index", 0).coerceIn(0, library.lastIndex.coerceAtLeast(0))
     }
 
@@ -94,10 +100,13 @@ internal class LocalMp3Player(
         }
     }
 
-    fun addDownload(file: java.io.File, title: String) {
-        library.add(Track(Uri.fromFile(file), title, UNTAGGED))
+    fun addDownload(download: MusicDownloads.SavedTrack): Boolean {
+        val uri = Uri.fromFile(download.file)
+        if (library.any { it.uri == uri }) return false
+        library.add(Track(uri, download.title, cleanGenre(download.genre)))
         saveLibrary()
         onChange?.invoke()
+        return true
     }
 
     fun entries(genre: String?): List<LibraryEntry> = library.mapIndexedNotNull { position, track ->
@@ -228,6 +237,7 @@ internal class LocalMp3Player(
     }
 
     fun close() {
+        drive.index.unregisterOnSharedPreferenceChangeListener(driveUpdates)
         onChange = null
         releasePlayer()
     }

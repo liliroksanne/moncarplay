@@ -138,6 +138,7 @@ class MatrixSkullView @JvmOverloads constructor(
         val charWidth = paintText.measureText("W")
         val charHeight = paintText.textSize * 1.2f
 
+        val targetCols = (width / charWidth).toInt()
         val targetRows = (height / charHeight).toInt()
 
         if (targetCols <= 0 || targetRows <= 0) return
@@ -320,3 +321,4 @@ class MatrixSkullView @JvmOverloads constructor(
         handler.removeCallbacks(runnable)
     }
 }
+

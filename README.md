@@ -1,25 +1,24 @@
 # Mon para estéreo Android
 
-Mon conserva el avatar Matrix, el chat morado y la voz del sistema. El chat responde en español con frases predefinidas y funciona sin una cuenta ni conexión. Está pensado para instalarse directamente en una pantalla que ejecute aplicaciones Android, como un estéreo con Android 8.1 o posterior.
+Mon es un copiloto con chat local, avatar Matrix y reproductor de MP3. En horizontal, la música queda a la izquierda y el avatar a la derecha. El botón grande **Hablar**, centrado abajo, transcribe una frase y la envía al chat. **Voz de Mon** activa la respuesta hablada. Ambos usan los servicios instalados en el equipo y funcionan en español cuando esos servicios están disponibles.
 
-## Música local
+## Pasar rolas por Bluetooth
 
-1. Abre Mon y pulsa **Agregar MP3**.
-2. Selecciona uno o varios archivos en el almacenamiento del estéreo o en una USB que aparezca en el selector de Android.
-3. Pulsa **Biblioteca** para elegir una pista, o usa los botones de reproducción, pausa, anterior y siguiente.
+1. Vincula tu celular Android y el estéreo desde los ajustes de Bluetooth. El estéreo debe admitir la recepción de archivos por Bluetooth.
+2. Desde la app Archivos del celular, selecciona uno o varios MP3 y usa **Compartir → Bluetooth**. Elige el nombre del estéreo y acepta la transferencia en la pantalla.
+3. En Mon, pulsa **Agregar MP3** y busca los archivos recibidos. También puedes seleccionarlos en la app Archivos del estéreo y usar **Compartir → Mon**, si el gestor muestra esa opción.
 
-Mon conserva la biblioteca entre sesiones. El archivo original debe seguir disponible. La reproducción se pausa al salir de la app.
+Mon copia las pistas a su carpeta interna `rolas`. Puedes quitar la copia de la carpeta Bluetooth o desconectar la USB después de importar. La app conserva la biblioteca y evita añadir archivos idénticos dos veces.
 
-Puedes escribir «hola», «pon música», «pausa», «siguiente canción» o «canción anterior». El interruptor **Micrófono** usa el reconocedor del equipo cuando está disponible. La voz sintetizada requiere un motor de texto a voz con español instalado.
+Abre **Biblioteca** para elegir un género o ver todas las rolas. Mon lee la etiqueta de género del MP3. Con **Editar género** puedes corregirla o asignarle una a una pista que aparece en **Sin género**. Al seleccionar una pista desde un género, anterior y siguiente recorren ese grupo. La música se pausa al salir de la app.
 
-En una pantalla horizontal de 1280 × 720 el chat y el reproductor se muestran lado a lado con una densidad típica de estéreo. En ventanas estrechas, el reproductor queda debajo del chat.
+Prueba «qué onda», «quién eres», «cuéntame un chiste», «modo turbo», «pon una rola», «pausa» y «siguiente rola».
 
+## Sincronización con Google Drive
+
+Mon revisa la carpeta pública `musica` con conexión a Internet. Android programa una revisión periódica cada 15 minutos, sujeta a la disponibilidad de conexión y a las reglas de batería del equipo. Al abrir Mon, puede programar la primera revisión sin esperar todo el intervalo.
+
+Las pistas nuevas quedan disponibles sin conexión en **Biblioteca**. Mon evita guardar copias idénticas y conserva las pistas locales si se eliminan de Drive. Busca también en subcarpetas públicas. Para pedir una grabación concreta, di «descárgame la de…» o «bájame…» y el nombre tal como aparece en Drive. Di «descarga todas» para revisar la carpeta en ese momento.
 ## Compilación
 
-Abre el proyecto en Android Studio con el SDK configurado, o ejecuta desde la raíz:
-
-```powershell
-.\gradlew.bat :app:assembleDebug :app:testDebugUnitTest
-```
-
-La APK de depuración se genera en `app/build/outputs/apk/debug/`.
+Abre el proyecto en Android Studio y usa **Build → Generate App Bundles or APKs → Generate APKs**. La APK de depuración se genera en `app/build/outputs/apk/debug/`. La aplicación requiere Android 8.1 o posterior.
